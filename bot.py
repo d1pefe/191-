@@ -22,7 +22,7 @@ from openpyxl.utils import get_column_letter
 
 
 # =========================
-# 🆘 СПИСОК ВОССТАНОВЛЕНИЯ (ВАШИ ДАННЫЕ)
+# 🆘 СПИСОК ВОССТАНОВЛЕНИЯ
 # =========================
 RESTORE_MAP = {
     985885291: "7Д",    # Викуля
@@ -32,7 +32,7 @@ RESTORE_MAP = {
     491637076: "1В",    # Angela Heliver
     5754839732: "6В",   # Яна Журавлева
     872432083: "8Д",    # Мария Цветкова
-    1458749718: "2Г",   # Natalya (в доке 2UГ, исправил на 2Г)
+    1458749718: "2Г",   # Natalya
     957495306: "9Г",    # Никита Маевский
     1358716864: "9А",   # Татьяна Колядко
     1176975177: "9В",   # Larisa
@@ -72,13 +72,9 @@ ADMIN_IDS: List[int] = [7233585816]
 SECRET_CODE = "учитель2026"
 
 MAX_STUDENTS = 32
-
-# -100... id приватной группы
 REPORT_CHAT_ID: Optional[int] = -1003756818645
-
 LOG_LEVEL = "INFO"
 
-# Значения по умолчанию
 DEFAULT_TOTAL_SHIFT_1 = 1067
 DEFAULT_TOTAL_SHIFT_2 = 256
 
@@ -99,8 +95,6 @@ logger = logging.getLogger("attendance_bot")
 # =========================
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher(storage=MemoryStorage())
-
-# анти-лаг
 USER_LOCKS: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
@@ -136,9 +130,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: st
 def init_db():
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS teachers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER UNIQUE NOT NULL,
@@ -149,10 +141,8 @@ def init_db():
             is_approved INTEGER DEFAULT 0,
             registered_at TEXT DEFAULT (datetime('now'))
         )
-        """
-    )
-    cur.execute(
-        """
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS daily_reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             teacher_id INTEGER NOT NULL,
@@ -167,94 +157,58 @@ def init_db():
             FOREIGN KEY (teacher_id) REFERENCES teachers (id) ON DELETE CASCADE,
             UNIQUE(teacher_id, report_date)
         )
-        """
-    )
-    cur.execute(
-        """
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value INTEGER
         )
-        """
-    )
+    """)
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("total_1", DEFAULT_TOTAL_SHIFT_1))
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("total_2", DEFAULT_TOTAL_SHIFT_2))
-
     ensure_column(conn, "teachers", "subject", "TEXT")
     ensure_column(conn, "teachers", "class_name", "TEXT")
     ensure_column(conn, "teachers", "username", "TEXT")
-
     conn.commit()
     conn.close()
     logger.info("✅ База данных проверена")
 
 def run_restore_process():
-    """Функция запускается при старте и восстанавливает учителей из RESTORE_MAP"""
-    if not RESTORE_MAP:
-        return
-    
+    if not RESTORE_MAP: return
     conn = get_connection()
     cur = conn.cursor()
     restored_cnt = 0
-    
-    logger.info(f"🔄 Проверка списка восстановления ({len(RESTORE_MAP)} записей)...")
-    
     for tg_id, class_name in RESTORE_MAP.items():
         try:
-            # Проверяем, есть ли такой ID
             cur.execute("SELECT id FROM teachers WHERE telegram_id = ?", (tg_id,))
-            if cur.fetchone():
-                continue # Уже есть, пропускаем
-            
-            # Вставляем
-            full_name_stub = f"Учитель (ID {tg_id})"
-            cur.execute(
-                """
-                INSERT INTO teachers (telegram_id, full_name, class_name, is_approved)
-                VALUES (?, ?, ?, 1)
-                """,
-                (tg_id, full_name_stub, class_name)
-            )
+            if cur.fetchone(): continue
+            cur.execute("INSERT INTO teachers (telegram_id, full_name, class_name, is_approved) VALUES (?, ?, ?, 1)",
+                        (tg_id, f"Учитель (ID {tg_id})", class_name))
             restored_cnt += 1
-        except Exception as e:
-            logger.error(f"Ошибка восстановления {tg_id}: {e}")
-            
+        except Exception: pass
     conn.commit()
     conn.close()
-    if restored_cnt > 0:
-        logger.info(f"✅ Успешно восстановлено учителей: {restored_cnt}")
+    if restored_cnt: logger.info(f"✅ Успешно восстановлено учителей: {restored_cnt}")
 
 
 # =========================
 # DB HELPERS
 # =========================
 def update_username_if_changed(telegram_id: int, new_username: Optional[str], new_fullname: Optional[str] = None):
-    """Обновляет username и ФИО при активности"""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT username, full_name FROM teachers WHERE telegram_id = ?", (telegram_id,))
     row = cur.fetchone()
-    
     if row:
-        updates = []
-        params = []
-        
-        # Обновляем username если изменился
+        updates, params = [], []
         if row["username"] != new_username:
-            updates.append("username = ?")
-            params.append(new_username)
-            
-        # Обновляем ФИО, если оно было "Учитель (ID...)"
+            updates.append("username = ?"); params.append(new_username)
         if new_fullname and "Учитель (ID" in row["full_name"]:
-            updates.append("full_name = ?")
-            params.append(new_fullname)
-            
+            updates.append("full_name = ?"); params.append(new_fullname)
         if updates:
-            sql = f"UPDATE teachers SET {', '.join(updates)} WHERE telegram_id = ?"
             params.append(telegram_id)
-            cur.execute(sql, tuple(params))
+            cur.execute(f"UPDATE teachers SET {', '.join(updates)} WHERE telegram_id = ?", tuple(params))
             conn.commit()
-            
     conn.close()
 
 def get_setting(key: str, default: int) -> int:
@@ -295,14 +249,10 @@ def get_teacher_by_id(t_id: int) -> Optional[Dict[str, Any]]:
 
 def create_teacher_if_missing(telegram_id: int, full_name: str, username: Optional[str]) -> Dict[str, Any]:
     t = get_teacher_by_telegram(telegram_id)
-    if t:
-        return t
+    if t: return t
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO teachers(telegram_id, full_name, username, is_approved) VALUES (?, ?, ?, 0)",
-        (telegram_id, full_name, username),
-    )
+    cur.execute("INSERT INTO teachers(telegram_id, full_name, username, is_approved) VALUES (?, ?, ?, 0)", (telegram_id, full_name, username))
     conn.commit()
     conn.close()
     return get_teacher_by_telegram(telegram_id) or {}
@@ -322,8 +272,6 @@ def decline_teacher_db(teacher_id: int):
     conn.close()
 
 def update_teacher_field(teacher_id: int, field: str, value: str):
-    if field not in {"subject", "class_name", "full_name", "username"}:
-        return
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(f"UPDATE teachers SET {field} = ? WHERE id = ?", (value, teacher_id))
@@ -333,33 +281,18 @@ def update_teacher_field(teacher_id: int, field: str, value: str):
 def get_teachers_by_status(approved: bool) -> List[Dict[str, Any]]:
     conn = get_connection()
     cur = conn.cursor()
-    is_appr = 1 if approved else 0
-    cur.execute(
-        "SELECT * FROM teachers WHERE is_approved = ? ORDER BY class_name, full_name",
-        (is_appr,)
-    )
+    cur.execute("SELECT * FROM teachers WHERE is_approved = ? ORDER BY class_name, full_name", (1 if approved else 0,))
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
 
 def search_teachers(q: str) -> List[Dict[str, Any]]:
     q = (q or "").strip()
-    if not q:
-        return []
+    if not q: return []
     like = f"%{q.lower()}%"
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM teachers
-        WHERE lower(full_name) LIKE ?
-           OR lower(class_name) LIKE ?
-           OR lower(username) LIKE ?
-           OR CAST(telegram_id AS TEXT) LIKE ?
-        ORDER BY is_approved DESC, class_name
-        """,
-        (like, like, like, f"%{q}%"),
-    )
+    cur.execute("SELECT * FROM teachers WHERE lower(full_name) LIKE ? OR lower(class_name) LIKE ? OR CAST(telegram_id AS TEXT) LIKE ? ORDER BY is_approved DESC, class_name", (like, like, f"%{q}%"))
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
@@ -388,8 +321,7 @@ def create_or_get_report(teacher_id: int, report_date_iso: str) -> Dict[str, Any
     return dict(row2) if row2 else {}
 
 def set_report_value(report_id: int, field: str, value: int) -> bool:
-    if field not in {"sick", "sanatorium", "parent_statement", "competition", "absent_without_reason"}:
-        return False
+    if field not in {"sick", "sanatorium", "parent_statement", "competition", "absent_without_reason"}: return False
     value = max(0, min(int(MAX_STUDENTS), safe_int(value)))
     conn = get_connection()
     cur = conn.cursor()
@@ -402,10 +334,7 @@ def set_report_value(report_id: int, field: str, value: int) -> bool:
 def submit_report(report_id: int) -> bool:
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE daily_reports SET is_submitted = 1, submitted_at = datetime('now') WHERE id = ? AND is_submitted = 0",
-        (report_id,),
-    )
+    cur.execute("UPDATE daily_reports SET is_submitted = 1, submitted_at = datetime('now') WHERE id = ? AND is_submitted = 0", (report_id,))
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
@@ -424,10 +353,8 @@ def today_iso() -> str:
     return date.today().isoformat()
 
 def safe_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
+    try: return int(x)
+    except: return default
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -446,24 +373,17 @@ def get_shift_teachers(second_shift: bool) -> List[Dict[str, Any]]:
     return [t for t in rows if is_second_shift_class(t.get("class_name")) == second_shift]
 
 async def safe_answer(cb: types.CallbackQuery, text: Optional[str] = None, show_alert: bool = False):
-    try:
-        await cb.answer(text=text, show_alert=show_alert)
-    except Exception:
-        pass
+    try: await cb.answer(text=text, show_alert=show_alert)
+    except: pass
 
 async def safe_edit_text(msg: types.Message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
-    try:
-        await msg.edit_text(text, reply_markup=reply_markup)
-    except Exception:
-        try:
-            await msg.answer(text, reply_markup=reply_markup)
-        except Exception:
-            pass
+    try: await msg.edit_text(text, reply_markup=reply_markup)
+    except:
+        try: await msg.answer(text, reply_markup=reply_markup)
+        except: pass
 
 def format_teacher_label(t: Dict[str, Any]) -> str:
-    cls = t.get("class_name") or "?"
-    name = t.get("full_name")
-    return f"{cls} — {name}"
+    return f"{t.get('class_name') or '?'} — {t.get('full_name')}"
 
 
 # =========================
@@ -477,6 +397,10 @@ def admin_main_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✅ Подтвержденные", callback_data="admin_approved"),
             ],
             [
+                InlineKeyboardButton(text="🔔 Разослать формы", callback_data="admin_forms_menu"),
+                InlineKeyboardButton(text="📊 Отправить Excel", callback_data="admin_excel_menu"),
+            ],
+            [
                 InlineKeyboardButton(text="🔍 Поиск", callback_data="admin_search"),
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings"),
             ],
@@ -486,6 +410,15 @@ def admin_main_kb() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+def shift_select_kb(prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора смены для действий"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 смена", callback_data=f"{prefix}|1")],
+        [InlineKeyboardButton(text="2 смена (3* и 6*)", callback_data=f"{prefix}|2")],
+        [InlineKeyboardButton(text="Обе смены", callback_data=f"{prefix}|both")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
 
 def settings_kb() -> InlineKeyboardMarkup:
     t1 = get_setting("total_1", DEFAULT_TOTAL_SHIFT_1)
@@ -578,13 +511,12 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
     wb = Workbook()
     ws = wb.active
     ws.title = "Отчеты"
-
+    
     # Styles
     header_fill = PatternFill("solid", fgColor="E7EEF7")
     total_fill = PatternFill("solid", fgColor="FFF2CC")
     percent_fill = PatternFill("solid", fgColor="E2F0D9")
-    present_fill = PatternFill("solid", fgColor="C6E0B4") 
-
+    present_fill = PatternFill("solid", fgColor="C6E0B4")
     bold = Font(bold=True)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left = Alignment(horizontal="left", vertical="center", wrap_text=True)
@@ -624,19 +556,13 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
             par = safe_int(rep.get("parent_statement"))
             comp = safe_int(rep.get("competition"))
             no = safe_int(rep.get("absent_without_reason"))
-            
-            total_sick += sick
-            total_san += san
-            total_parent += par
-            total_comp += comp
-            total_no += no
+            total_sick += sick; total_san += san; total_parent += par; total_comp += comp; total_no += no
         else:
             status = "Не сдан"
             pending_cnt += 1
             sick = san = par = comp = no = 0
 
         ws.append([cls, status, sick, san, par, comp, no])
-        
         for c in range(1, 8):
             cell = ws.cell(row=row_idx, column=c)
             cell.border = border
@@ -645,7 +571,6 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
 
     ws.append(["ИТОГО (Отсутствует)", f"Сдано: {submitted_cnt}", total_sick, total_san, total_parent, total_comp, total_no])
     total_row = row_idx
-    
     for c in range(1, 8):
         cell = ws.cell(row=total_row, column=c)
         cell.font = bold
@@ -654,23 +579,16 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
         cell.alignment = center if c >= 2 else left
 
     denom = total_students_count if total_students_count > 0 else 1
-    ws.append([
-        "ПРОЦЕНТ (Отсутствует)", f"от {total_students_count}",
-        total_sick / denom, total_san / denom, total_parent / denom,
-        total_comp / denom, total_no / denom
-    ])
+    ws.append(["ПРОЦЕНТ (Отсутствует)", f"от {total_students_count}", total_sick/denom, total_san/denom, total_parent/denom, total_comp/denom, total_no/denom])
     percent_row = total_row + 1
-    
     for c in range(1, 8):
         cell = ws.cell(row=percent_row, column=c)
         cell.font = bold
         cell.fill = percent_fill
         cell.border = border
         cell.alignment = center if c >= 2 else left
-    for c in range(3, 8):
-        ws.cell(row=percent_row, column=c).number_format = "0.00%"
+    for c in range(3, 8): ws.cell(row=percent_row, column=c).number_format = "0.00%"
 
-    # === ПРИСУТСТВУЮЩИЕ ===
     total_absent_sum = total_sick + total_san + total_parent + total_comp + total_no
     total_present = max(0, total_students_count - total_absent_sum)
     present_pct = total_present / denom
@@ -678,7 +596,6 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
     ws.append(["ПРИСУТСТВУЕТ (Чел.)", "", total_present, "", "", "", ""])
     present_row_num = percent_row + 1
     ws.merge_cells(start_row=present_row_num, start_column=3, end_row=present_row_num, end_column=7)
-    
     ws.cell(row=present_row_num, column=1).font = bold
     ws.cell(row=present_row_num, column=1).fill = present_fill
     ws.cell(row=present_row_num, column=1).border = border
@@ -691,7 +608,6 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
     ws.append(["ПРИСУТСТВУЕТ (%)", "", present_pct, "", "", "", ""])
     present_pct_row = present_row_num + 1
     ws.merge_cells(start_row=present_pct_row, start_column=3, end_row=present_pct_row, end_column=7)
-    
     ws.cell(row=present_pct_row, column=1).font = bold
     ws.cell(row=present_pct_row, column=1).fill = present_fill
     ws.cell(row=present_pct_row, column=1).border = border
@@ -705,7 +621,6 @@ def build_shift_excel(report_date_iso: str, second_shift: bool, teachers: List[D
     col_widths = [10, 22, 12, 12, 22, 18, 24]
     for i, w in enumerate(col_widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
-
     ws.freeze_panes = "A3"
     
     bio = BytesIO()
@@ -719,18 +634,16 @@ async def send_shift_excel_to_chat(report_date_iso: str, second_shift: bool, tea
     doc = BufferedInputFile(file_bytes, filename=filename)
 
     if REPORT_CHAT_ID:
-        try:
-            await bot.send_document(REPORT_CHAT_ID, doc, caption=f"📎 Итог {report_date_iso} ({shift_label})")
+        try: await bot.send_document(REPORT_CHAT_ID, doc, caption=f"📎 Итог {report_date_iso} ({shift_label})")
         except: pass
     
     for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_document(admin_id, doc, caption=f"📎 Итог {report_date_iso} ({shift_label})")
+        try: await bot.send_document(admin_id, doc, caption=f"📎 Итог {report_date_iso} ({shift_label})")
         except: pass
 
 
 # =========================
-# SCHEDULE LOGIC
+# SCHEDULE & NOTIFY LOGIC
 # =========================
 @dataclass(frozen=True)
 class ScheduleEvent:
@@ -745,7 +658,6 @@ SCHEDULE: List[ScheduleEvent] = [
     ScheduleEvent("08:20", False, "Напоминание 3/4", False),
     ScheduleEvent("08:30", False, "Напоминание 4/4", False),
     ScheduleEvent("08:40", False, "Итог", True),
-
     ScheduleEvent("13:10", True, "Напоминание 1/3", False),
     ScheduleEvent("13:20", True, "Напоминание 2/3", False),
     ScheduleEvent("13:30", True, "Напоминание 3/3", False),
@@ -762,8 +674,7 @@ async def notify_teacher_fill(telegram_id: int, report_date_iso: str, label: str
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Заполнить отчет", callback_data="manual_report_start")]])
         )
         return True
-    except Exception:
-        return False
+    except Exception: return False
 
 async def schedule_loop():
     while True:
@@ -773,12 +684,9 @@ async def schedule_loop():
             hhmm = now.strftime("%H:%M")
 
             for ev in SCHEDULE:
-                if ev.hhmm != hhmm:
-                    continue
-
+                if ev.hhmm != hhmm: continue
                 key = f"{d_iso}|{hhmm}|{ev.second_shift}"
-                if key in _EXECUTED:
-                    continue
+                if key in _EXECUTED: continue
                 _EXECUTED.add(key)
 
                 create_today_reports_for_all_approved()
@@ -790,24 +698,19 @@ async def schedule_loop():
                     sent_count = 0
                     for t in teachers:
                         rep = get_report_by_teacher_id(int(t["id"]), d_iso)
-                        if rep and safe_int(rep.get("is_submitted")) == 1:
-                            continue
-                        success = await notify_teacher_fill(int(t["telegram_id"]), d_iso, ev.label)
-                        if success:
+                        if rep and safe_int(rep.get("is_submitted")) == 1: continue
+                        if await notify_teacher_fill(int(t["telegram_id"]), d_iso, ev.label):
                             sent_count += 1
                         await asyncio.sleep(0.05)
                     
                     for admin_id in ADMIN_IDS:
-                        try:
-                            await bot.send_message(admin_id, f"📢 Рассылка '{ev.label}' завершена.\nДоставлено: <b>{sent_count}</b>")
+                        try: await bot.send_message(admin_id, f"📢 Рассылка '{ev.label}' завершена.\nДоставлено: <b>{sent_count}</b>")
                         except: pass
-
-            if len(_EXECUTED) > 5000:
-                _EXECUTED.clear()
-
+            
+            if len(_EXECUTED) > 5000: _EXECUTED.clear()
             await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"schedule_loop error: {e}")
+            logger.error(f"schedule error: {e}")
             await asyncio.sleep(5)
 
 
@@ -828,23 +731,13 @@ async def admin_render_main(msg: types.Message):
     
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) as tot, SUM(CASE WHEN is_submitted=1 THEN 1 ELSE 0 END) as sub FROM daily_reports WHERE report_date=?",
-        (today,)
-    )
+    cur.execute("SELECT COUNT(*) as tot, SUM(CASE WHEN is_submitted=1 THEN 1 ELSE 0 END) as sub FROM daily_reports WHERE report_date=?", (today,))
     st = cur.fetchone()
     conn.close()
     
-    sub = st['sub'] or 0
-    tot = st['tot'] or 0
-
-    text = (
-        "👑 <b>Админ-панель</b>\n\n"
-        f"📅 <b>{today}</b>\n"
-        f"✅ Учителей: <b>{len(teachers_appr)}</b>\n"
-        f"⏳ Заявок: <b>{len(teachers_wait)}</b>\n"
-        f"📊 Сдано отчетов: <b>{sub} / {tot}</b>"
-    )
+    sub = st['sub'] or 0; tot = st['tot'] or 0
+    text = (f"👑 <b>Админ-панель</b>\n\n📅 <b>{today}</b>\n✅ Учителей: <b>{len(teachers_appr)}</b>\n"
+            f"⏳ Заявок: <b>{len(teachers_wait)}</b>\n📊 Сдано отчетов: <b>{sub} / {tot}</b>")
     try: await msg.edit_text(text, reply_markup=admin_main_kb())
     except: await msg.answer(text, reply_markup=admin_main_kb())
 
@@ -861,48 +754,99 @@ async def cb_admin_refresh(cb: types.CallbackQuery):
     await admin_render_main(cb.message)
     await safe_answer(cb, "Обновлено")
 
-# Settings
+# --- MANUAL ACTIONS UI ---
+@dp.callback_query(F.data == "admin_forms_menu")
+async def cb_forms_menu(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    await cb.message.edit_text("🔔 <b>Рассылка форм</b>\nВыберите смену, которой отправить уведомление:", reply_markup=shift_select_kb("forms_send"))
+
+@dp.callback_query(F.data == "admin_excel_menu")
+async def cb_excel_menu(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    await cb.message.edit_text("📊 <b>Отправка Excel</b>\nВыберите смену для формирования отчета:", reply_markup=shift_select_kb("excel_send"))
+
+# --- MANUAL ACTIONS LOGIC ---
+@dp.callback_query(F.data.startswith("forms_send|"))
+async def cb_forms_send_action(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    shift = cb.data.split("|")[1]
+    
+    shifts_to_process = []
+    if shift == '1': shifts_to_process = [False]
+    elif shift == '2': shifts_to_process = [True]
+    else: shifts_to_process = [False, True]
+    
+    d_iso = today_iso()
+    create_today_reports_for_all_approved()
+    total_sent = 0
+    
+    await safe_answer(cb, "Рассылка запущена...")
+    
+    for is_2nd in shifts_to_process:
+        teachers = get_shift_teachers(is_2nd)
+        for t in teachers:
+            rep = get_report_by_teacher_id(int(t["id"]), d_iso)
+            if rep and safe_int(rep.get("is_submitted")) == 1: continue
+            if await notify_teacher_fill(int(t["telegram_id"]), d_iso, "Ручная рассылка"):
+                total_sent += 1
+            await asyncio.sleep(0.05)
+
+    await cb.message.edit_text(f"✅ Успешно отправлено форм: <b>{total_sent}</b>", reply_markup=back_kb())
+
+@dp.callback_query(F.data.startswith("excel_send|"))
+async def cb_excel_send_action(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    shift = cb.data.split("|")[1]
+    
+    shifts_to_process = []
+    if shift == '1': shifts_to_process = [False]
+    elif shift == '2': shifts_to_process = [True]
+    else: shifts_to_process = [False, True]
+
+    d_iso = today_iso()
+    create_today_reports_for_all_approved()
+    
+    await safe_answer(cb, "Генерация...")
+    
+    for is_2nd in shifts_to_process:
+        teachers = get_shift_teachers(is_2nd)
+        await send_shift_excel_to_chat(d_iso, is_2nd, teachers)
+    
+    await cb.message.edit_text("✅ Excel файлы сформированы и отправлены.", reply_markup=back_kb())
+
+
+# --- Settings ---
 @dp.callback_query(F.data == "admin_settings")
 async def cb_admin_settings(cb: types.CallbackQuery):
     if not is_admin(cb.from_user.id): return
-    await cb.message.edit_text("⚙️ <b>Настройки количества учащихся</b>", reply_markup=settings_kb())
+    await cb.message.edit_text("⚙️ <b>Настройки учащихся</b>", reply_markup=settings_kb())
 
 @dp.callback_query(F.data.startswith("set_total|"))
 async def cb_set_total(cb: types.CallbackQuery, state: FSMContext):
-    shift_num = cb.data.split("|")[1]
-    await state.update_data(shift_num=shift_num)
+    await state.update_data(shift_num=cb.data.split("|")[1])
     await state.set_state(AdminStates.waiting_for_setting_val)
-    await cb.message.answer(f"Введите новое количество для <b>{shift_num} смены</b>:")
+    await cb.message.answer(f"Введите количество для <b>{cb.data.split('|')[1]} смены</b>:")
     await safe_answer(cb)
 
 @dp.message(AdminStates.waiting_for_setting_val)
 async def st_setting_val(message: types.Message, state: FSMContext):
     val = safe_int(message.text, -1)
-    if val < 0:
-        await message.answer("Число должно быть >= 0")
-        return
+    if val < 0: return await message.answer("Число должно быть >= 0")
     data = await state.get_data()
-    key = f"total_{data.get('shift_num')}"
-    set_setting(key, val)
+    set_setting(f"total_{data.get('shift_num')}", val)
     await state.clear()
     await message.answer("✅ Сохранено")
     await admin_render_main(message)
 
-# Approved list
+# --- Teachers Lists ---
 @dp.callback_query(F.data == "admin_approved")
 async def cb_admin_approved(cb: types.CallbackQuery):
     if not is_admin(cb.from_user.id): return
     teachers = get_teachers_by_status(True)
-    if not teachers:
-        await cb.message.edit_text("✅ Список пуст.", reply_markup=back_kb())
-        return
-
-    kb_rows = []
-    for t in teachers:
-        lbl = format_teacher_label(t)
-        kb_rows.append([InlineKeyboardButton(text=lbl, callback_data=f"manage_teacher|{t['id']}")])
+    if not teachers: return await cb.message.edit_text("✅ Список пуст.", reply_markup=back_kb())
+    kb_rows = [[InlineKeyboardButton(text=format_teacher_label(t), callback_data=f"manage_teacher|{t['id']}")] for t in teachers]
     kb_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await cb.message.edit_text("✅ <b>Подтвержденные учителя</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await cb.message.edit_text("✅ <b>Подтвержденные</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
 
 @dp.callback_query(F.data.startswith("manage_teacher|"))
 async def cb_manage_teacher(cb: types.CallbackQuery):
@@ -914,30 +858,22 @@ async def cb_manage_teacher(cb: types.CallbackQuery):
             f"User: {uname}\nКласс: <b>{t.get('class_name') or '-'}</b>\nПредмет: <b>{t.get('subject') or '-'}</b>")
     await cb.message.edit_text(text, reply_markup=teacher_manage_kb(tid))
 
-# Pending list
 @dp.callback_query(F.data == "admin_pending")
 async def cb_admin_pending(cb: types.CallbackQuery):
     if not is_admin(cb.from_user.id): return
     teachers = get_teachers_by_status(False)
-    if not teachers:
-        await cb.message.edit_text("⏳ Заявок нет.", reply_markup=back_kb())
-        return
-    kb_rows = []
-    for t in teachers:
-        lbl = f"⏳ {t['full_name']} ({t.get('username') or '?'})"
-        kb_rows.append([InlineKeyboardButton(text=lbl, callback_data=f"pending_teacher|{t['id']}")])
+    if not teachers: return await cb.message.edit_text("⏳ Заявок нет.", reply_markup=back_kb())
+    kb_rows = [[InlineKeyboardButton(text=f"⏳ {t['full_name']}", callback_data=f"pending_teacher|{t['id']}")] for t in teachers]
     kb_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await cb.message.edit_text("⏳ <b>Ожидают подтверждения</b>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await cb.message.edit_text("⏳ <b>Ожидают</b>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
 
 @dp.callback_query(F.data.startswith("pending_teacher|"))
 async def cb_pending_details(cb: types.CallbackQuery):
     tid = int(cb.data.split("|")[1])
     t = get_teacher_by_id(tid)
     if not t: return
-    uname = f"@{t['username']}" if t['username'] else "нет"
-    await cb.message.edit_text(f"🆕 <b>Заявка</b>\nФИО: {t['full_name']}\nUser: {uname}", reply_markup=teacher_pending_kb(tid))
+    await cb.message.edit_text(f"🆕 <b>Заявка</b>\nФИО: {t['full_name']}", reply_markup=teacher_pending_kb(tid))
 
-# Actions
 @dp.callback_query(F.data.startswith(("appr|", "decl|")))
 async def cb_teacher_action(cb: types.CallbackQuery):
     action, tid = cb.data.split("|")
@@ -947,7 +883,7 @@ async def cb_teacher_action(cb: types.CallbackQuery):
     else:
         decline_teacher_db(int(tid))
         await safe_answer(cb, "🗑 Удалено")
-    await cb_admin_approved(cb) if action == "decl" else cb_admin_pending(cb)
+    await cb_admin_approved(cb) if action == "decl" else await cb_admin_pending(cb)
 
 @dp.callback_query(F.data.startswith(("setclass|", "setsubj|")))
 async def cb_edit_field(cb: types.CallbackQuery, state: FSMContext):
@@ -979,14 +915,8 @@ async def cb_search(cb: types.CallbackQuery, state: FSMContext):
 async def st_search(message: types.Message, state: FSMContext):
     rows = search_teachers(message.text)
     await state.clear()
-    if not rows:
-        await message.answer("Ничего не найдено.")
-        return
-    kb_rows = []
-    for t in rows:
-        btn_txt = f"{'✅' if t['is_approved'] else '⏳'} {t['full_name']} ({t.get('class_name') or '-'})"
-        action = "manage_teacher" if t['is_approved'] else "pending_teacher"
-        kb_rows.append([InlineKeyboardButton(text=btn_txt, callback_data=f"{action}|{t['id']}")])
+    if not rows: return await message.answer("Ничего не найдено.")
+    kb_rows = [[InlineKeyboardButton(text=f"{'✅' if t['is_approved'] else '⏳'} {t['full_name']} ({t.get('class_name') or '-'})", callback_data=f"{'manage_teacher' if t['is_approved'] else 'pending_teacher'}|{t['id']}")] for t in rows]
     kb_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     await message.answer(f"Результаты ({len(rows)}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
 
@@ -1004,8 +934,7 @@ async def st_broadcast(message: types.Message, state: FSMContext):
     for t in get_teachers_by_status(True):
         try:
             await bot.send_message(t['telegram_id'], f"📢 <b>Сообщение от администратора:</b>\n\n{txt}")
-            cnt += 1
-            await asyncio.sleep(0.05)
+            cnt += 1; await asyncio.sleep(0.05)
         except: pass
     await message.answer(f"✅ Отправлено {cnt} учителям.")
     await admin_render_main(message)
@@ -1016,19 +945,13 @@ async def st_broadcast(message: types.Message, state: FSMContext):
 # =========================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    # Обновляем инфу при старте
     update_username_if_changed(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    
     t = get_teacher_by_telegram(message.from_user.id)
     if t:
-        if t['is_approved']:
-            await message.answer("👋 С возвращением! Используйте /report для отчета.")
-        else:
-            await message.answer("⏳ Ваша заявка на рассмотрении.")
-    elif is_admin(message.from_user.id):
-        await message.answer("👑 Админ-панель: /admin")
-    else:
-        await message.answer("🔒 Введите секретный код.")
+        if t['is_approved']: await message.answer("👋 С возвращением! Используйте /report для отчета.")
+        else: await message.answer("⏳ Ваша заявка на рассмотрении.")
+    elif is_admin(message.from_user.id): await message.answer("👑 Админ-панель: /admin")
+    else: await message.answer("🔒 Введите секретный код.")
 
 @dp.message(Command("report"))
 async def cmd_report(message: types.Message):
@@ -1036,16 +959,11 @@ async def cmd_report(message: types.Message):
 
 async def show_report_user(message: types.Message):
     update_username_if_changed(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    
     t = get_teacher_by_telegram(message.from_user.id)
-    if not t or not t['is_approved']:
-        await message.answer("⛔ Нет доступа.")
-        return
-    
+    if not t or not t['is_approved']: return await message.answer("⛔ Нет доступа.")
     d = today_iso()
     rep = create_or_get_report(t['id'], d)
-    if rep['is_submitted']:
-        await message.answer("✅ Отчет уже отправлен.")
+    if rep['is_submitted']: await message.answer("✅ Отчет уже отправлен.")
     else:
         txt = (f"📅 Отчет <b>{d}</b>\n🤒 Болеют: {rep['sick']}\n🏥 Санаторий: {rep['sanatorium']}\n"
                f"📄 Заявление: {rep['parent_statement']}\n🏆 Соревнования: {rep['competition']}\n❌ Без причины: {rep['absent_without_reason']}")
@@ -1058,36 +976,25 @@ async def cb_manual_start(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith(("edit|", "set|", "delta|", "back|", "refresh|", "submit|", "noop")))
 async def cb_report_logic(cb: types.CallbackQuery):
-    if cb.data == "noop":
-        await safe_answer(cb)
-        return
+    if cb.data == "noop": return await safe_answer(cb)
     lock = USER_LOCKS[cb.from_user.id]
-    if lock.locked():
-        await safe_answer(cb, "⏳")
-        return
-
+    if lock.locked(): return await safe_answer(cb, "⏳")
     async with lock:
-        parts = cb.data.split("|")
-        action = parts[0]
-        
+        parts = cb.data.split("|"); action = parts[0]
         if action == "submit":
-            if submit_report(int(parts[1])):
-                await safe_edit_text(cb.message, "✅ Отчет отправлен!")
-            else:
-                await safe_answer(cb, "Ошибка", True)
+            if submit_report(int(parts[1])): await safe_edit_text(cb.message, "✅ Отчет отправлен!")
+            else: await safe_answer(cb, "Ошибка", True)
             return
-        
         if action in ("back", "refresh"):
             conn = get_connection()
             r = conn.execute("SELECT * FROM daily_reports WHERE id=?", (int(parts[1]),)).fetchone()
             conn.close()
             if r:
-                r_dict = dict(r)
-                txt = (f"📅 Отчет <b>{r_dict['report_date']}</b>\n🤒 Болеют: {r_dict['sick']}\n🏥 Санаторий: {r_dict['sanatorium']}\n"
-                       f"📄 Заявление: {r_dict['parent_statement']}\n🏆 Соревнования: {r_dict['competition']}\n❌ Без причины: {r_dict['absent_without_reason']}")
-                await safe_edit_text(cb.message, txt, report_kb(r_dict))
+                r = dict(r)
+                txt = (f"📅 Отчет <b>{r['report_date']}</b>\n🤒 Болеют: {r['sick']}\n🏥 Санаторий: {r['sanatorium']}\n"
+                       f"📄 Заявление: {r['parent_statement']}\n🏆 Соревнования: {r['competition']}\n❌ Без причины: {r['absent_without_reason']}")
+                await safe_edit_text(cb.message, txt, report_kb(r))
             return
-            
         if action == "edit":
             conn = get_connection()
             r = conn.execute("SELECT * FROM daily_reports WHERE id=?", (int(parts[2]),)).fetchone()
@@ -1095,21 +1002,18 @@ async def cb_report_logic(cb: types.CallbackQuery):
             if r and not r['is_submitted']:
                 await safe_edit_text(cb.message, f"Поле: <b>{parts[1]}</b>\nТекущее: {r[parts[1]]}", number_kb(parts[1], r[parts[1]], int(parts[2])))
             return
-        
         if action in ("set", "delta"):
             conn = get_connection()
             r = conn.execute("SELECT * FROM daily_reports WHERE id=?", (int(parts[3]),)).fetchone()
             conn.close()
-            if not r or r['is_submitted']:
-                await safe_answer(cb, "Недоступно", True)
-                return
+            if not r or r['is_submitted']: return await safe_answer(cb, "Недоступно", True)
             new_val = int(parts[2]) if action == "set" else r[parts[1]] + int(parts[2])
             set_report_value(int(parts[3]), parts[1], new_val)
             await safe_edit_text(cb.message, f"Поле: <b>{parts[1]}</b>\nНовое: {max(0, new_val)}", number_kb(parts[1], max(0, new_val), int(parts[3])))
 
 
 # =========================
-# REGISTRATION
+# REGISTRATION & MAIN
 # =========================
 @dp.message()
 async def catch_secret_code(message: types.Message):
@@ -1120,23 +1024,15 @@ async def catch_secret_code(message: types.Message):
             for adm in ADMIN_IDS:
                 try: await bot.send_message(adm, f"🆕 Новый учитель: {t['full_name']}\n/admin -> Ожидают")
                 except: pass
-        else:
-            await message.answer("✅ Вы уже подтверждены.")
+        else: await message.answer("✅ Вы уже подтверждены.")
 
-# =========================
-# MAIN
-# =========================
 async def main():
     init_db()
-    # Запуск восстановления из списка
     run_restore_process()
-    
     logger.info("Bot started")
     asyncio.create_task(schedule_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
